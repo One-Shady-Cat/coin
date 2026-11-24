@@ -155,6 +155,13 @@ bool SoCpuRayPresenter::prepare(const cc_glglue * glue,std::string & detail){
   }
   GLenum previous=glGetError();
   if(previous!=GL_NO_ERROR){errorDetail(detail,"preexisting GL error before CPU prepare",previous);return false;}
+#if !COIN_BUILD_LEGACY_GL_RENDERER
+  // This build cannot isolate compatibility alpha-test state during presentation.
+  if (cc_glglue_context_supports_legacy_rendering(glue)) {
+    detail = "CPU presentation requires a core profile with this build";
+    return false;
+  }
+#endif
   // These caller states can alter/clip a fullscreen shader whose outputs do
   // not implement the caller's logical operations or user clipping contract.
   const bool logicOp=glIsEnabled(GL_COLOR_LOGIC_OP)!=GL_FALSE;
