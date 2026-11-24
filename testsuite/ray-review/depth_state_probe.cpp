@@ -1,10 +1,16 @@
 #include <windows.h>
-#include <GL/glcorearb.h>
 
 #include <Inventor/C/glue/gl.h>
+#if COIN_HAVE_LEGACY_GL_RENDERER
+#include <GL/glext.h>
+#endif
+#include <GL/wglext.h>
 #include <Inventor/SbViewportRegion.h>
 #include <Inventor/SoDB.h>
 #include <Inventor/SoRenderManager.h>
+#if COIN_HAVE_LEGACY_GL_RENDERER
+#include <Inventor/actions/SoGLRenderAction.h>
+#endif
 #include <Inventor/elements/SoGLCacheContextElement.h>
 #include <Inventor/misc/SoContextHandler.h>
 #include <Inventor/nodes/SoCube.h>
@@ -85,6 +91,7 @@ struct Window {
   HWND window = nullptr;
   HDC dc = nullptr;
   HGLRC context = nullptr;
+  HGLRC bootstrap = nullptr;
   const HGLRC previous = wglGetCurrentContext();
   const HDC previousDc = wglGetCurrentDC();
   const HINSTANCE instance = GetModuleHandleW(nullptr);
@@ -119,6 +126,27 @@ struct Window {
       need(format && SetPixelFormat(dc, format, &p), "set owned pixel format");
       context = wglCreateContext(dc);
       need(context && wglMakeCurrent(dc, context), "activate owned WGL context");
+#if !COIN_HAVE_LEGACY_GL_RENDERER
+      const auto createContext = reinterpret_cast<PFNWGLCREATECONTEXTATTRIBSARBPROC>(
+        wglGetProcAddress("wglCreateContextAttribsARB"));
+      need(createContext != nullptr, "WGL core context creation unavailable");
+      const int attributes[] = {
+        WGL_CONTEXT_MAJOR_VERSION_ARB, 3,
+        WGL_CONTEXT_MINOR_VERSION_ARB, 3,
+        WGL_CONTEXT_PROFILE_MASK_ARB, WGL_CONTEXT_CORE_PROFILE_BIT_ARB,
+        0
+      };
+      HGLRC core = createContext(dc, nullptr, attributes);
+      need(core != nullptr, "create owned WGL core context");
+      if (!wglMakeCurrent(dc, core)) {
+        wglDeleteContext(core);
+        need(false, "activate owned WGL core context");
+      }
+      bootstrap = context;
+      context = core;
+      need(wglDeleteContext(bootstrap) != FALSE, "delete bootstrap WGL context");
+      bootstrap = nullptr;
+#endif
     }
     catch (...) { close(); throw; }
   }
@@ -130,6 +158,10 @@ struct Window {
         wglGetCurrentContext() == previous && wglGetCurrentDC() == previousDc;
       deleted = wglDeleteContext(context) != FALSE;
       context = nullptr;
+    }
+    if (bootstrap) {
+      deleted = (wglDeleteContext(bootstrap) != FALSE) && deleted;
+      bootstrap = nullptr;
     }
     if (dc) { released = ReleaseDC(window, dc) != 0; dc = nullptr; }
     if (window) {
@@ -195,6 +227,12 @@ struct Target {
     glDrawBuffer(GL_COLOR_ATTACHMENT0);
     glReadBuffer(GL_COLOR_ATTACHMENT0);
     glViewport(0, 0, side, side);
+  }
+  GLint depthBits() const {
+    GLint bits = 0;
+    cc_glglue_glGetFramebufferAttachmentParameteriv(
+      glue, GL_DRAW_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_FRAMEBUFFER_ATTACHMENT_DEPTH_SIZE, &bits);
+    return bits;
   }
   void reset(bool preserved) const {
     bind();
@@ -324,7 +362,11 @@ struct Scene {
     manager.setAutoClipping(SoRenderManager::NO_AUTO_CLIPPING);
     manager.setSceneGraph(root.node);
     manager.setBackgroundColor(SbColor4f(0, 0, 0, 1));
+#if COIN_HAVE_LEGACY_GL_RENDERER
     manager.getGLRenderAction()->setCacheContext(cache);
+#else
+    (void)cache;
+#endif
     manager.setRenderPipeline(SoRenderManager::RenderPipeline::DRAW_LIST);
     manager.setCpuRayTracingReadback(overlay ? FALSE : TRUE);
   }
@@ -451,7 +493,7 @@ int wmain(int argc, wchar_t ** argv) {
       out << "{\"schema\":\"coin.depth-state.observations.v1\",\"mode\":";
       jsonString(out, fs::path(mode).u8string());
       out << ",\"width\":" << side << ",\"height\":" << side
-          << ",\"framebuffer\":" << target.fbo << ",\"depth_bits\":" << integer(GL_DEPTH_BITS)
+          << ",\"framebuffer\":" << target.fbo << ",\"depth_bits\":" << target.depthBits()
           << ",\"samples\":" << integer(GL_SAMPLES) << ",\"loaded_coin_module\":";
       jsonString(out, fs::path(module).u8string());
       out << ",\"gl_vendor\":";
